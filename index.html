@@ -176,17 +176,21 @@ function royaliCatalogPayload(p){
  return clean;
 }
 async function royaliUploadImage(p){
- if(p._imageFile){const file=p._imageFile;const safeName=String(file.name||'foto').replace(/[^a-zA-Z0-9._-]/g,'_').slice(-80);const path='produtos/'+String(p.id).replace(/[^a-zA-Z0-9_-]/g,'_')+'/'+Date.now()+'_'+safeName;const ref=storageRef(storage,path);await uploadBytes(ref,file,{contentType:file.type});const url=await getDownloadURL(ref);p.image=url;return url;}
+ if(p._imageFile){const file=p._imageFile;const safeName=String(file.name||'foto').replace(/[^a-zA-Z0-9._-]/g,'_').slice(-80);const path='produtos/'+String(p.id).replace(/[^a-zA-Z0-9_-]/g,'_')+'/'+Date.now()+'_'+safeName;const ref=storageRef(storage,path);await uploadBytes(ref,file,{contentType:file.type});const url=await getDownloadURL(ref);p.image=url;delete p._imageFile;return url;}
  if(typeof p.image==='string'&&/^https?:\/\//i.test(p.image))return p.image;
  if(royaliCatalogImageUrls[p.id])return royaliCatalogImageUrls[p.id];
  // Não grava imagens Base64 grandes no Firestore; produtos padrão mantêm a imagem local do site.
  if(typeof p.image==='string'&&p.image.startsWith('data:image/')&&p.image.length<90000)return p.image;
  return '';
 }
-async function royaliWriteProduct(p){
+async function royaliPrepareProduct(p,onProgress=()=>{}){
  const clean=royaliCatalogPayload(p);const image=await royaliUploadImage(p);
  if(image&&/^https?:\/\//i.test(image)){clean.imageUrl=image;royaliCatalogImageUrls[p.id]=image;}else if(image){clean.image=image;}
  else if(royaliCatalogImageUrls[p.id])clean.imageUrl=royaliCatalogImageUrls[p.id];
+ return clean;
+}
+async function royaliWriteProduct(p){
+ const clean=await royaliPrepareProduct(p);
  await setDoc(doc(db,'produtos',String(p.id)),clean,{merge:true});
 }
 async function royaliLoadCatalog(seedIfEmpty=false){
@@ -200,37 +204,31 @@ async function royaliLoadCatalog(seedIfEmpty=false){
 window.royaliSaveCatalog=async(items,onProgress=()=>{})=>{
  if(!auth.currentUser)throw new Error('Sessão administrativa ausente. Entre novamente no painel.');
  if(!Array.isArray(items)||!items.length)throw new Error('Catálogo vazio.');
+ if(items.length>450)throw new Error('O catálogo excede o limite seguro de 450 produtos por gravação.');
  const ids=new Set();
  for(const p of items){if(!p.id||ids.has(String(p.id)))throw new Error('Há produtos com identificadores repetidos.');ids.add(String(p.id));if(!String(p.name||'').trim())throw new Error('Todo produto precisa de nome.');}
- const withTimeout=(promise,label,ms=60000)=>Promise.race([promise,new Promise((_,reject)=>setTimeout(()=>reject(new Error(label+' não recebeu confirmação do Firebase em '+Math.round(ms/1000)+' segundos. Confira a conexão e as regras do Firestore/Storage; a operação pode ainda terminar no servidor.')),ms))]);
- const batch=writeBatch(db),uploaded=[];
- // Primeiro envia as fotos e prepara os documentos. Não remove os arquivos locais antes da confirmação do lote.
+ const withTimeout=(promise,label,ms)=>Promise.race([promise,new Promise((_,reject)=>setTimeout(()=>reject(new Error(label+' excedeu '+Math.round(ms/1000)+' segundos.')),ms))]);
+ const prepared=[];
+ // Etapa 1: preparar dados e enviar apenas as imagens novas ao Storage.
  for(let i=0;i<items.length;i++){
    const p=items[i],label=String(p.name||p.id||'produto');
    onProgress('Preparando '+(i+1)+'/'+items.length+': '+label+'…');
    try{
-     const clean=royaliCatalogPayload(p);
-     const image=await withTimeout(royaliUploadImage(p),'Enviar foto de “'+label+'”');
-     if(image&&/^https?:\/\//i.test(image))clean.imageUrl=image;
-     else if(image)clean.image=image;
-     else if(royaliCatalogImageUrls[p.id])clean.imageUrl=royaliCatalogImageUrls[p.id];
-     batch.set(doc(db,'produtos',String(p.id)),clean,{merge:true});
-     uploaded.push({p,image});
-   }catch(e){throw new Error('Falha ao preparar “'+label+'” ('+(i+1)+' de '+items.length+'): '+(e?.code?e.code+' — ':'')+(e?.message||'erro desconhecido'));}
+     const clean=await withTimeout(royaliPrepareProduct(p),'Preparar produto “'+label+'” (incluindo envio da foto)',60000);
+     prepared.push({id:String(p.id),name:label,clean});
+   }catch(e){throw new Error('Falha ao preparar “'+label+'” ('+(i+1)+' de '+items.length+'). Etapa: foto/validação. '+(e?.code?e.code+' — ':'')+(e?.message||'erro desconhecido'));}
  }
- onProgress('Gravando '+items.length+' produtos no Firebase…');
- try{await withTimeout(batch.commit(),'Gravar o lote do catálogo');}
- catch(e){throw new Error('O Firebase não confirmou a gravação do catálogo: '+(e?.code?e.code+' — ':'')+(e?.message||'erro desconhecido'));}
- // Só marca as fotos como concluídas depois que o Firestore confirma o lote.
- for(const {p,image} of uploaded){
-   if(image&&/^https?:\/\//i.test(image)){royaliCatalogImageUrls[p.id]=image;p.image=image;}
-   if(p._imageFile)delete p._imageFile;
- }
+ // Etapa 2: gravação única no Firestore para evitar catálogo parcialmente atualizado.
+ onProgress('Gravando '+prepared.length+' produtos no Firestore…');
+ try{
+   const batch=writeBatch(db);
+   for(const item of prepared)batch.set(doc(db,'produtos',item.id),item.clean,{merge:true});
+   await withTimeout(batch.commit(),'Gravação do catálogo no Firestore',60000);
+ }catch(e){throw new Error('As fotos foram preparadas, mas o Firestore não confirmou a gravação do catálogo. '+(e?.code?e.code+' — ':'')+(e?.message||'Verifique as regras de acesso e a conexão.'));}
  royaliCatalogReady=true;
- onProgress('Produtos gravados. Registrando histórico…');
- // O histórico não pode transformar uma gravação bem-sucedida em falso erro de catálogo.
- royaliAudit('catálogo salvo','catálogo',items.length,{productCount:items.length}).catch(e=>console.warn('Catálogo salvo; histórico administrativo não confirmado:',e));
- return {saved:items.length};
+ onProgress('Catálogo confirmado no Firebase.');
+ // O histórico é secundário: uma falha nele não deve transformar uma gravação concluída em erro.
+ royaliAudit('catálogo salvo','catálogo',prepared.length,{productCount:prepared.length}).catch(()=>{});
 };
 window.royaliGetCatalogBackup=async()=>{const snap=await getDocs(collection(db,'produtos'));return {app:'Royali Batatas Recheadas',type:'catalogo-firebase',createdAt:new Date().toISOString(),projectId:cfg.projectId,products:snap.docs.map(d=>({id:d.id,...d.data()})),notice:'Inclui apenas catálogo e URLs de fotos; não inclui pedidos, mensagens nem arquivos de imagem.'};};
 async function royaliAudit(action,entity,entityId,details={}){try{if(!auth.currentUser)return;await addDoc(collection(db,'historico_admin'),{action,entity,entityId:String(entityId||''),details,actorUid:auth.currentUser.uid,createdAt:serverTimestamp()});}catch(e){console.error('Não foi possível registrar histórico administrativo:',e);}}
