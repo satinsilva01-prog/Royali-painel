@@ -211,8 +211,41 @@ function royaliCatalogPayload(p){
  for(const [k,v] of Object.entries(p.prices||{})){if(v===null||v===undefined||v===''){clean.prices[k]=null;continue;}const n=Number(v);if(!Number.isFinite(n)||n<0)throw new Error('Preço inválido no produto '+clean.name);clean.prices[k]=Math.round(n*100)/100;}
  return clean;
 }
+async async function royaliPrepareImageForUpload(file){
+ // Reduz fotos grandes antes do envio, especialmente em celulares e conexões móveis.
+ // Se o navegador não oferecer os recursos de imagem, mantém o arquivo original.
+ try{
+  if(!file||!/^image\//i.test(file.type||''))return file;
+  if(file.size<=700*1024)return file;
+  if(typeof createImageBitmap!=='function')return file;
+  const bitmap=await createImageBitmap(file);
+  const maxSide=1600,scale=Math.min(1,maxSide/Math.max(bitmap.width,bitmap.height));
+  const canvas=document.createElement('canvas');
+  canvas.width=Math.max(1,Math.round(bitmap.width*scale));
+  canvas.height=Math.max(1,Math.round(bitmap.height*scale));
+  const ctx=canvas.getContext('2d');
+  if(!ctx){bitmap.close?.();return file;}
+  ctx.fillStyle='#ffffff';ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.drawImage(bitmap,0,0,canvas.width,canvas.height);
+  bitmap.close?.();
+  const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',0.82));
+  if(!blob||blob.size>=file.size)return file;
+  return new File([blob],(String(file.name||'foto').replace(/\.[^.]+$/,'')||'foto')+'.jpg',{type:'image/jpeg',lastModified:Date.now()});
+ }catch(err){console.warn('Royali: não foi possível otimizar a foto; enviando original.',err);return file;}
+}
 async function royaliUploadImage(p){
- if(p._imageFile){const file=p._imageFile;const safeName=String(file.name||'foto').replace(/[^a-zA-Z0-9._-]/g,'_').slice(-80);const path='produtos/'+String(p.id).replace(/[^a-zA-Z0-9_-]/g,'_')+'/'+Date.now()+'_'+safeName;const ref=storageRef(storage,path);await uploadBytes(ref,file,{contentType:file.type});const url=await getDownloadURL(ref);p.image=url;delete p._imageFile;return url;}
+ if(p._imageFile){
+  const originalFile=p._imageFile;
+  const file=await royaliPrepareImageForUpload(originalFile);
+  const safeName=String(file.name||'foto').replace(/[^a-zA-Z0-9._-]/g,'_').slice(-80);
+  const path='produtos/'+String(p.id).replace(/[^a-zA-Z0-9_-]/g,'_')+'/'+Date.now()+'_'+safeName;
+  const ref=storageRef(storage,path);
+  await uploadBytes(ref,file,{contentType:file.type||'image/jpeg'});
+  const url=await getDownloadURL(ref);
+  p.image=url;
+  delete p._imageFile;
+  return url;
+ }
  if(typeof p.image==='string'&&/^https?:\/\//i.test(p.image))return p.image;
  if(royaliCatalogImageUrls[p.id])return royaliCatalogImageUrls[p.id];
  // Não grava imagens Base64 grandes no Firestore; produtos padrão mantêm a imagem local do site.
@@ -254,7 +287,7 @@ window.royaliSaveCatalog=async(items,onProgress=()=>{})=>{
  if(!Array.isArray(items))throw new Error('Formato de catálogo inválido.');
  const ids=new Set();
  for(const p of items){if(!p.id||ids.has(String(p.id)))throw new Error('Há produtos com identificadores repetidos.');ids.add(String(p.id));if(!String(p.name||'').trim())throw new Error('Todo produto precisa de nome.');}
- const withTimeout=(promise,label,ms=25000)=>Promise.race([promise,new Promise((_,reject)=>setTimeout(()=>reject(new Error(label+' demorou mais de '+Math.round(ms/1000)+' segundos. Verifique conexão e permissões do Firebase.')),ms))]);
+ const withTimeout=(promise,label,ms=60000)=>Promise.race([promise,new Promise((_,reject)=>setTimeout(()=>reject(new Error(label+' demorou mais de '+Math.round(ms/1000)+' segundos. Verifique conexão, tamanho da foto e permissões do Firebase.')),ms))]);
  for(let i=0;i<items.length;i++){
    const p=items[i];const label=String(p.name||p.id||'produto');
    onProgress('Salvando '+(i+1)+'/'+items.length+': '+label+'…');
