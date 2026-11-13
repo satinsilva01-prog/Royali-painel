@@ -799,28 +799,23 @@ function rcBenefit(coupon,items){
 let rcAdminAuthorized=false,rcAdminRows=[],rcAdminStop=null;
 async function rcOwner(){
  if(!auth.currentUser||!rcAdminAuthorized||window.royaliCurrentStaff)throw Error('Acesso exclusivo do proprietário.');
+ const owner=await getDoc(doc(db,'admins',auth.currentUser.uid));if(!owner.exists()||owner.data().active!==true||owner.data().role!=='owner')throw Error('A gestão dos cupons exige o perfil de proprietário.');
 }
 function rcAdminMessage(message){const el=document.getElementById('rcAdminMessage');if(el)el.textContent=message;}
 function rcAdminError(e){console.error(e);rcAdminMessage(e.code==='permission-denied'?'O Firebase bloqueou os cupons. Aplique o complemento de regras fornecido, preservando as regras atuais.':e.message);}
 function rcAdminFormatDate(v){const ms=rcDate(v);return ms?new Date(ms).toLocaleString('pt-BR'):'Não iniciada';}
 function rcAdminRender(){
  const host=document.getElementById('rcAdminList');if(!host)return;
- const query=String(document.getElementById('rcAdminSearch')?.value||'').trim().toUpperCase();
- const rows=rcAdminRows.filter(c=>!query||[c.code,c.controlNumber,c.label].some(s=>String(s).toUpperCase().includes(query)));
- const used=rcAdminRows.filter(c=>c.status==='utilizado').length,reserved=rcAdminRows.filter(c=>c.status==='reservado').length;
- document.getElementById('rcAdminCounts').textContent=rcAdminRows.length+' cadastrados • '+used+' utilizados • '+reserved+' reservados';
- host.innerHTML=rows.map(c=>{
-  const expired=c.status==='ativo'&&rcDate(c.expiresAt)<=Date.now();
-  return '<article style="padding:12px;border-bottom:1px solid #ddd"><b>Nº '+esc(c.controlNumber)+' • '+esc(c.label)+'</b><p style="margin:6px 0">Código: <strong>'+esc(c.code)+'</strong> • '+esc(expired?'Vencido':c.status)+'</p><p style="margin:6px 0">Validade: '+esc(rcAdminFormatDate(c.expiresAt))+(c.orderId?' • Pedido #'+esc(c.orderId.slice(-6).toUpperCase()):'')+'</p>'+(c.status==='aguardando_entrega'?'<button type="button" data-rc-deliver="'+esc(c.id)+'">Entreguei agora — iniciar 15 dias</button>':'')+(c.status==='ativo'?'<button type="button" data-rc-disable="'+esc(c.id)+'">Desativar cupom</button>':'')+(['reservado','utilizado'].includes(c.status)?'<button type="button" data-rc-release="'+esc(c.id)+'">Liberar se o pedido foi cancelado</button>':'')+'</article>';
- }).join('')||'<p>Nenhum cupom encontrado. Cadastre o lote para começar.</p>';
+ const query=String(document.getElementById('rcAdminSearch')?.value||'').trim();
+ const rows=rcAdminRows.filter(c=>!query||String(c.controlNumber).includes(query));
+ document.getElementById('rcAdminCounts').textContent=rcAdminRows.length+' raspadinhas cadastradas';
+ host.innerHTML=rows.map(c=>'<article style="padding:12px;border-bottom:1px solid #ddd"><b>Nº '+esc(c.controlNumber)+'</b><p style="margin:6px 0">Entrega: '+esc(c.deliveredAt?rcAdminFormatDate(c.deliveredAt):'Ainda não registrada')+'</p><p style="margin:6px 0">Validade até: '+esc(c.expiresAt?rcAdminFormatDate(c.expiresAt):'Ainda não iniciada')+'</p>'+(!c.deliveredAt?'<button type="button" data-rc-deliver="'+esc(c.id)+'">Registrar entrega — iniciar 15 dias</button>':'')+'</article>').join('')||'<p>Nenhuma raspadinha encontrada.</p>';
  host.querySelectorAll('[data-rc-deliver]').forEach(b=>b.onclick=()=>rcDeliver(b.dataset.rcDeliver));
- host.querySelectorAll('[data-rc-disable]').forEach(b=>b.onclick=async()=>{try{await rcOwner();await runTransaction(db,async tx=>{const ref=doc(db,'cupons_royali',b.dataset.rcDisable),snap=await tx.get(ref);if(snap.data()?.status!=='ativo')throw Error('O cupom mudou de situação. Atualize a lista.');tx.update(ref,{status:'desativado',updatedAt:serverTimestamp()});});}catch(e){rcAdminError(e);}});
- host.querySelectorAll('[data-rc-release]').forEach(b=>b.onclick=async()=>{try{await rcOwner();const row=rcAdminRows.find(c=>c.id===b.dataset.rcRelease);await rcReleaseForCancelledOrder(row.orderId);rcAdminMessage('Cupom liberado, mantendo a validade original.');}catch(e){rcAdminError(e);}});
 }
 async function rcDeliver(id){try{
  await rcOwner();await runTransaction(db,async tx=>{
   const ref=doc(db,'cupons_royali',id),snap=await tx.get(ref);
-  if(snap.data()?.status!=='aguardando_entrega')throw Error('Esta raspadinha já foi ativada. A validade não será reiniciada.');
+  if(snap.data()?.status!=='aguardando_entrega'||snap.data()?.deliveredAt)throw Error('Esta raspadinha já foi ativada. A validade não será reiniciada.');
   tx.update(ref,{status:'ativo',deliveredAt:serverTimestamp(),expiresAt:Timestamp.fromMillis(Date.now()+15*86400000),updatedAt:serverTimestamp()});
  });rcAdminMessage('Raspadinha ativada por 15 dias.');
 }catch(e){rcAdminError(e);}}
@@ -829,13 +824,13 @@ async function rcImportBatch(){
  try{
   await rcOwner();let count=0;
   for(const item of RC_BATCH){
-   const id=await rcHash(item.codigo);
+   const id=await rcHash(item.codigo||('ROYALI001SEMPREMIO'+item.numero_controle));
    const created=await runTransaction(db,async tx=>{
     const ref=doc(db,'cupons_royali',id),snap=await tx.get(ref);if(snap.exists())return false;
-    tx.set(ref,{code:item.codigo,controlNumber:item.numero_controle,batch:'ROYALI-001',label:item.resultado,type:item.tipo,percent:item.percentual_desconto||0,status:'aguardando_entrega',deliveredAt:null,expiresAt:null,orderId:null,customerUid:null,createdAt:serverTimestamp(),updatedAt:serverTimestamp()});return true;
+    tx.set(ref,{code:item.codigo||null,controlNumber:item.numero_controle,batch:'ROYALI-001',label:item.resultado,type:item.tipo,percent:item.percentual_desconto||0,status:'aguardando_entrega',deliveredAt:null,expiresAt:null,orderId:null,customerUid:null,createdAt:serverTimestamp(),updatedAt:serverTimestamp()});return true;
    });
    if(created)count++;
-   rcAdminMessage('Cadastrando cupons: '+(RC_BATCH.indexOf(item)+1)+' de 50…');
+   rcAdminMessage('Cadastrando raspadinhas: '+(RC_BATCH.indexOf(item)+1)+' de 60…');
   }
   rcAdminMessage('Lote conferido. Novos cupons: '+count+'. Os existentes foram preservados. Marque a entrega para iniciar cada validade.');
  }catch(e){rcAdminError(e);}finally{btn.disabled=false;}
@@ -848,7 +843,8 @@ async function rcReadBatch(file){
   const rows=data.raspadinhas.filter(r=>r.codigo);
   const counts=rows.reduce((a,r)=>{const k=r.tipo==='desconto_percentual'?String(r.percentual_desconto):r.tipo;a[k]=(a[k]||0)+1;return a;},{});
   if(rows.length!==50||new Set(rows.map(r=>rcNormalize(r.codigo))).size!==50||counts['5']!==30||counts['10']!==15||counts.refri_600ml!==4||counts.batata_500g!==1||rows.some(r=>!/^R[A-Z2-9]{8}$/.test(r.codigo)||!/^\d{4}$/.test(r.numero_controle)))throw Error('As quantidades ou os códigos do arquivo não correspondem ao lote combinado.');
-  RC_BATCH=rows;await rcImportBatch();
+  if(data.raspadinhas.filter(r=>!r.codigo&&r.tipo==='sem_premio').length!==10||new Set(data.raspadinhas.map(r=>r.numero_controle)).size!==60||data.raspadinhas.some(r=>!/^\d{4}$/.test(r.numero_controle)))throw Error('Confira a numeração das 60 raspadinhas.');
+  RC_BATCH=data.raspadinhas;await rcImportBatch();
  }catch(e){rcAdminError(e);}
 }
 window.royaliOpenCoupons=async function(){
@@ -856,7 +852,7 @@ window.royaliOpenCoupons=async function(){
   await rcOwner();let overlay=document.getElementById('rcAdminOverlay');
   if(!overlay){
    overlay=document.createElement('div');overlay.id='rcAdminOverlay';overlay.style.cssText='position:fixed;inset:0;z-index:99000;background:#0008;padding:16px;overflow:auto';
-   overlay.innerHTML='<section style="max-width:850px;margin:20px auto;padding:20px;background:#fff;color:#21352a;border-radius:14px"><div style="display:flex;justify-content:space-between;gap:15px"><h2>Cupons das raspadinhas</h2><button type="button" id="rcAdminClose">Fechar</button></div><p>Lote 001: 30 de 5%, 15 de 10%, 4 refris e 1 batata. As 10 sem prêmio não geram cupom.</p><p><button type="button" id="rcImport">Cadastrar os 50 cupons do lote 001</button></p><label style="display:block;padding:12px 0"><input id="rcEnabled" type="checkbox"> Mostrar campo de cupom no site</label><p>Antes de distribuir cada raspadinha, marque “Entreguei agora” para iniciar os 15 dias.</p><p id="rcAdminMessage" role="status" aria-live="polite"></p><p id="rcAdminCounts"></p><label for="rcAdminSearch">Buscar pelo número, código ou prêmio</label><input id="rcAdminSearch" style="display:block;padding:10px;width:100%;box-sizing:border-box;margin:8px 0" placeholder="Ex.: 0001"><div id="rcAdminList"></div></section>';
+   overlay.innerHTML='<section style="max-width:850px;margin:20px auto;padding:20px;background:#fff;color:#21352a;border-radius:14px"><div style="display:flex;justify-content:space-between;gap:15px"><h2>Cupons das raspadinhas</h2><button type="button" id="rcAdminClose">Fechar</button></div><p>Lote 001: 60 raspadinhas. Os resultados e códigos ficam ocultos nesta lista.</p><p><button type="button" id="rcImport">Importar as 60 raspadinhas do lote 001</button></p><label style="display:block;padding:12px 0"><input id="rcEnabled" type="checkbox"> Mostrar campo de cupom no site</label><p>Antes de distribuir cada raspadinha, marque “Registrar entrega” para iniciar os 15 dias.</p><p id="rcAdminMessage" role="status" aria-live="polite"></p><p id="rcAdminCounts"></p><label for="rcAdminSearch">Buscar pelo número da raspadinha</label><input id="rcAdminSearch" style="display:block;padding:10px;width:100%;box-sizing:border-box;margin:8px 0" placeholder="Ex.: 0001"><div id="rcAdminList"></div></section>';
    document.body.appendChild(overlay);document.getElementById('rcAdminClose').onclick=()=>{overlay.style.display='none';};
    const input=document.createElement('input');input.type='file';input.accept='.json,application/json';input.hidden=true;overlay.appendChild(input);
    input.onchange=()=>{const file=input.files?.[0];input.value='';if(file)rcReadBatch(file);};
@@ -889,6 +885,7 @@ async function rcAdminUpdateOrder(id,changes){
   if(order.status==='cancelado'&&changes.status!=='cancelado')throw Error('O pedido já está cancelado. Não é possível confirmar o pagamento ou reutilizar este pedido.');
   if(order.coupon?.id){couponRef=doc(db,'cupons_royali',order.coupon.id);cs=await tx.get(couponRef);}
   const next={...changes};
+  if(next.status==='cancelado'&&window.royaliCurrentStaff){const actor=await tx.get(doc(db,'funcionarios',auth.currentUser.uid));if(!actor.exists())throw Error('Funcionário não autorizado.');next.cancelledBy=actor.data().username;}
   if(order.coupon?.id){
    if(!cs?.exists()||cs.data().orderId!==id||!['reservado','utilizado'].includes(cs.data().status))throw Error('O cupom deste pedido precisa ser conferido antes de prosseguir.');
    const cancel=changes.status==='cancelado',paid=(changes.paymentStatus||order.paymentStatus)==='confirmado';
@@ -898,6 +895,7 @@ async function rcAdminUpdateOrder(id,changes){
   tx.update(ref,next);
  });
 }
+
 
 onAuthStateChanged(auth,async user=>{rcAdminAuthorized=false;if(rcAdminStop){rcAdminStop();rcAdminStop=null;}rcAdminRows=[];document.getElementById('rcAdminOverlay')?.remove();document.getElementById('rcOpen')?.setAttribute('hidden','');const gate=$('royaliAdminAuthGate'),panel=$('adminPage');stopRealtime();if(!user){rcAdminAuthorized=false;if(rcAdminStop){rcAdminStop();rcAdminStop=null;}document.getElementById('rcAdminOverlay')?.remove();document.getElementById('rcOpen')?.setAttribute('hidden','');window.royaliCurrentStaff=false;window.royaliStaffPermissions={};document.body.classList.remove('royali-staff-session');if(royaliKitchenStop){royaliKitchenStop();royaliKitchenStop=null;}$('royaliKitchenPage').style.display='none';panel.style.display='none';gate.style.display='flex';const floating=document.getElementById('royaliStoreFloatingControl');if(floating)floating.style.display='none';return;}try{const token=await user.getIdTokenResult(true);let allowed=token.claims.admin===true;if(!allowed){const adminSnap=await getDoc(doc(db,'admins',user.uid));allowed=adminSnap.exists()&&adminSnap.data().active===true;}let royaliStaff=false;let royaliStaffPermissions={};if(!allowed){const staffSnap=await getDoc(doc(db,'funcionarios',user.uid));const staff=staffSnap.exists()?staffSnap.data():null;if(staff?.active===true&&staff.role==='staff'&&user.uid==='8keVdDJF7TdTbRkgLlWF58Bemej1'&&String(staff.username).toLowerCase()==='operadorcaixa'){allowed=true;royaliStaff=true;royaliStaffPermissions=staff.permissions||{};}}if(!allowed){await signOut(auth);panel.style.display='none';gate.style.display='flex';status('Esta conta não tem autorização para o painel.');return;}rcAdminAuthorized=!royaliStaff;document.getElementById('rcOpen').hidden=royaliStaff;window.royaliCurrentStaff=royaliStaff;window.royaliStaffPermissions=royaliStaffPermissions;document.body.classList.toggle('royali-staff-session',royaliStaff);gate.style.display='none';royaliOpenArea(royaliWorkArea);if(royaliStaff){document.getElementById('royaliOwnerTools')?.setAttribute('style','display:none!important');}const floating=document.getElementById('royaliStoreFloatingControl');if(floating)floating.style.display=royaliStaff?'none':'inline-flex';window.royaliSyncFloatingStoreControl?.();window.setRoyaliAdminMode?.();try{await royaliLoadCatalog(!royaliStaff);if(document.getElementById('royaliTabCatalog')?.classList.contains('active'))window.royaliShowMainTab?.('cardapio');}catch(catErr){console.error(catErr);status('Login confirmado, mas não foi possível carregar o catálogo. Confira as regras do Firebase.');}window.renderAdmin?.('Pedidos');startOrders();}catch(e){panel.style.display='none';gate.style.display='flex';status('Não foi possível confirmar a autorização administrativa. O painel permanece bloqueado.');console.error(e);}});
 window.royaliAdminLogout=async()=>{try{stopRealtime();await signOut(auth);status('Você saiu do sistema.');}catch(e){console.error(e);status('Não foi possível encerrar a sessão. Tente novamente.');}};
