@@ -809,9 +809,23 @@ function rcAdminRender(){
  const query=String(document.getElementById('rcAdminSearch')?.value||'').trim();
  const rows=rcAdminRows.filter(c=>!query||String(c.controlNumber).includes(query));
  document.getElementById('rcAdminCounts').textContent=rcAdminRows.length+' raspadinhas cadastradas';
- host.innerHTML=rows.map(c=>'<article style="padding:12px;border-bottom:1px solid #ddd"><b>Nº '+esc(c.controlNumber)+'</b><p style="margin:6px 0">Entrega: '+esc(c.deliveredAt?rcAdminFormatDate(c.deliveredAt):'Ainda não registrada')+'</p><p style="margin:6px 0">Validade até: '+esc(c.expiresAt?rcAdminFormatDate(c.expiresAt):'Ainda não iniciada')+'</p>'+(!c.deliveredAt?'<button type="button" data-rc-deliver="'+esc(c.id)+'">Registrar entrega — iniciar 15 dias</button>':'')+'</article>').join('')||'<p>Nenhuma raspadinha encontrada.</p>';
+ host.innerHTML=rows.map(c=>'<article style="padding:12px;border-bottom:1px solid #ddd"><b>Nº '+esc(c.controlNumber)+'</b><p style="margin:6px 0">Entrega: '+esc(c.deliveredAt?rcAdminFormatDate(c.deliveredAt):'Ainda não registrada')+'</p><p style="margin:6px 0">Validade até: '+esc(c.expiresAt?rcAdminFormatDate(c.expiresAt):'Ainda não iniciada')+'</p>'+(!c.deliveredAt?'<button type="button" data-rc-deliver="'+esc(c.id)+'">Registrar entrega — iniciar 15 dias</button>':'<button type="button" data-rc-undo="'+esc(c.id)+'">Desfazer entrega</button>')+'</article>').join('')||'<p>Nenhuma raspadinha encontrada.</p>';
  host.querySelectorAll('[data-rc-deliver]').forEach(b=>b.onclick=()=>rcDeliver(b.dataset.rcDeliver));
+ host.querySelectorAll('[data-rc-undo]').forEach(b=>b.onclick=()=>rcUndoDelivery(b.dataset.rcUndo));
 }
+async function rcUndoDelivery(id){try{
+ await rcOwner();
+ const number=await runTransaction(db,async tx=>{
+  const ref=doc(db,'cupons_royali',id),snap=await tx.get(ref);
+  if(!snap.exists())throw Error('Raspadinha não encontrada.');
+  const c=snap.data();
+  if(c.status==='aguardando_entrega'&&!c.deliveredAt)return c.controlNumber;
+  if(!['ativo','desativado'].includes(c.status)||c.orderId||c.customerUid)throw Error('A entrega não pode ser desfeita: este cupom já está vinculado a um pedido ou foi utilizado.');
+  tx.update(ref,{status:'aguardando_entrega',deliveredAt:null,expiresAt:null,deliveryUndoneAt:serverTimestamp(),deliveryUndoneBy:auth.currentUser.uid,updatedAt:serverTimestamp()});
+  return c.controlNumber;
+ });
+ rcAdminMessage('Entrega da raspadinha nº '+number+' desfeita. A validade ficou aguardando uma nova entrega.');
+}catch(e){rcAdminError(e);}}
 async function rcDeliver(id){try{
  await rcOwner();await runTransaction(db,async tx=>{
   const ref=doc(db,'cupons_royali',id),snap=await tx.get(ref);
