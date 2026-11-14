@@ -866,16 +866,24 @@ window.royaliOpenCoupons=async function(){
   await rcOwner();let overlay=document.getElementById('rcAdminOverlay');
   if(!overlay){
    overlay=document.createElement('div');overlay.id='rcAdminOverlay';overlay.style.cssText='position:fixed;inset:0;z-index:99000;background:#0008;padding:16px;overflow:auto';
-   overlay.innerHTML='<section style="max-width:850px;margin:20px auto;padding:20px;background:#fff;color:#21352a;border-radius:14px"><div style="display:flex;justify-content:space-between;gap:15px"><h2>Cupons das raspadinhas</h2><button type="button" id="rcAdminClose">Fechar</button></div><p>Lote 001: 60 raspadinhas. Os resultados e códigos ficam ocultos nesta lista.</p><p><button type="button" id="rcImport">Importar as 60 raspadinhas do lote 001</button></p><label style="display:block;padding:12px 0"><input id="rcEnabled" type="checkbox"> Mostrar campo de cupom no site</label><p>Antes de distribuir cada raspadinha, marque “Registrar entrega” para iniciar os 15 dias.</p><p id="rcAdminMessage" role="status" aria-live="polite"></p><p id="rcAdminCounts"></p><label for="rcAdminSearch">Buscar pelo número da raspadinha</label><input id="rcAdminSearch" style="display:block;padding:10px;width:100%;box-sizing:border-box;margin:8px 0" placeholder="Ex.: 0001"><div id="rcAdminList"></div></section>';
+   overlay.innerHTML='<section style="max-width:850px;margin:20px auto;padding:20px;background:#fff;color:#21352a;border-radius:14px"><div style="display:flex;justify-content:space-between;gap:15px"><h2>Cupons das raspadinhas</h2><button type="button" id="rcAdminClose">Fechar</button></div><p>Lote 001: 60 raspadinhas. Os resultados e códigos ficam ocultos nesta lista.</p><p><button type="button" id="rcImport">Importar as 60 raspadinhas do lote 001</button></p><label style="display:block;padding:12px 0"><input id="rcEnabled" type="checkbox"> Mostrar campo de cupom no site</label><div style="margin:12px 0"><label for="rcSiteTitle"><b>Título do campo no site</b></label><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px"><input id="rcSiteTitle" maxlength="60" placeholder="Cupom da raspadinha" style="flex:1;min-width:170px;padding:10px;font-size:16px"><button type="button" id="rcSaveTitle">Salvar título</button></div><small>Até 60 caracteres. O texto será atualizado no site.</small></div><p>Antes de distribuir cada raspadinha, marque “Registrar entrega” para iniciar os 15 dias.</p><p id="rcAdminMessage" role="status" aria-live="polite"></p><p id="rcAdminCounts"></p><label for="rcAdminSearch">Buscar pelo número da raspadinha</label><input id="rcAdminSearch" style="display:block;padding:10px;width:100%;box-sizing:border-box;margin:8px 0" placeholder="Ex.: 0001"><div id="rcAdminList"></div></section>';
    document.body.appendChild(overlay);document.getElementById('rcAdminClose').onclick=()=>{overlay.style.display='none';};
    const input=document.createElement('input');input.type='file';input.accept='.json,application/json';input.hidden=true;overlay.appendChild(input);
    input.onchange=()=>{const file=input.files?.[0];input.value='';if(file)rcReadBatch(file);};
    document.getElementById('rcImport').onclick=()=>input.click();
    document.getElementById('rcAdminSearch').oninput=rcAdminRender;
+   document.getElementById('rcSaveTitle').onclick=async function(){
+    const button=this,input=document.getElementById('rcSiteTitle'),title=String(input.value||'').trim();
+    if(!title||title.length>60){rcAdminMessage('Digite um título de 1 a 60 caracteres.');input.focus();return;}
+    button.disabled=true;
+    try{await rcOwner();await setDoc(doc(db,'configuracoes','loja'),{couponTitle:title,updatedAt:serverTimestamp(),updatedBy:auth.currentUser.uid},{merge:true});input.value=title;rcAdminMessage('Título salvo. O site será atualizado automaticamente.');}
+    catch(e){rcAdminError(e);}finally{button.disabled=false;}
+   };
+
    document.getElementById('rcEnabled').onchange=async function(){const checked=this.checked;this.disabled=true;try{await rcOwner();await setDoc(doc(db,'configuracoes','loja'),{couponsEnabled:checked,updatedAt:serverTimestamp(),updatedBy:auth.currentUser.uid},{merge:true});rcAdminMessage(checked?'Campo de cupom ativado no site.':'Campo oculto no site. Cupons cadastrados foram preservados.');}catch(e){this.checked=!checked;rcAdminError(e);}finally{this.disabled=false;}};
   }
   overlay.style.display='block';
-  const cfg=await getDoc(doc(db,'configuracoes','loja'));document.getElementById('rcEnabled').checked=cfg.data()?.couponsEnabled===true;
+  const cfg=await getDoc(doc(db,'configuracoes','loja'));document.getElementById('rcEnabled').checked=cfg.data()?.couponsEnabled===true;document.getElementById('rcSiteTitle').value=String(cfg.data()?.couponTitle||'Cupom da raspadinha').trim().slice(0,60)||'Cupom da raspadinha';
   if(!rcAdminStop)rcAdminStop=onSnapshot(collection(db,'cupons_royali'),snap=>{rcAdminRows=snap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>String(a.controlNumber).localeCompare(String(b.controlNumber)));rcAdminRender();},rcAdminError);
   else rcAdminRender();
  }catch(e){alert(e.message);}
